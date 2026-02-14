@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Socratic Enhancer: Iteratively refine a spec using two Claude agents in a Socratic dialogue loop."""
+"""Socratic Enhancer: Iteratively refine a document using two Claude agents in a Socratic dialogue loop."""
 
 import argparse
 import asyncio
@@ -81,25 +81,73 @@ def extract_revised_spec(text: str) -> str | None:
     return None
 
 
+QUESTIONER_FOCUS = {
+    "early": (
+        "This is an early iteration. Focus on structure and intent:\n"
+        "- Is the purpose and scope clearly defined?\n"
+        "- Are the major components, concepts, or sections identified and justified?\n"
+        "- Are there key decisions or trade-offs that haven't been explicitly made?\n"
+        "- Are there dependencies, constraints, or assumptions that aren't stated?\n"
+        "- What would someone acting on this document need to decide for themselves?"
+    ),
+    "mid": (
+        "This is a mid iteration. Focus on interactions, edge cases, and consistency:\n"
+        "- Where do different parts of the document interact — are those boundaries clear?\n"
+        "- What are the failure modes or scenarios where things go wrong?\n"
+        "- Are there contradictions, ambiguities, or places where the document says two different things?\n"
+        "- What happens in unusual or extreme cases?\n"
+        "- What would someone misunderstand or get wrong when reading this?"
+    ),
+    "late": (
+        "This is a late iteration. Focus on completeness and actionability:\n"
+        "- Could someone act on this document without making any assumptions?\n"
+        "- Are all details, constraints, and criteria fully specified?\n"
+        "- What practical concerns are missing (resources, risks, sequencing)?\n"
+        "- Is anything vague where it should be precise, or over-specified where it should be flexible?\n"
+        "- What would go wrong in practice that this document doesn't address?"
+    ),
+}
+
+
+def get_questioner_focus(iteration: int, total_iterations: int) -> str:
+    """Return the appropriate question focus based on iteration progress."""
+    if total_iterations <= 1:
+        return QUESTIONER_FOCUS["early"]
+    progress = (iteration - 1) / (total_iterations - 1)
+    if progress < 0.34:
+        return QUESTIONER_FOCUS["early"]
+    elif progress < 0.67:
+        return QUESTIONER_FOCUS["mid"]
+    else:
+        return QUESTIONER_FOCUS["late"]
+
+
 async def run_questioner(
-    spec_text: str, num_questions: int, model: str, effort: str | None
+    spec_text: str, num_questions: int, model: str, effort: str | None,
+    iteration: int, total_iterations: int,
 ) -> tuple[str, float]:
     """Run an ephemeral Questioner agent. Returns (questions_text, cost)."""
-    prompt = f"""Read the following spec document and generate exactly {num_questions} Socratic questions that probe for:
-- Gaps in the specification
-- Ambiguities or unclear requirements
-- Edge cases not addressed
-- Unstated assumptions
-- Missing details or implementation concerns
+    focus = get_questioner_focus(iteration, total_iterations)
+    prompt = f"""Read the following document. First, understand what kind of document it is and what it's trying to achieve. Then generate exactly {num_questions} probing questions tailored to the document's purpose.
+
+{focus}
+
+Ask questions that force concrete, specific answers — not questions that can be answered with "yes" or "it depends." Each question should target something that, if left unresolved, would cause someone acting on this document to guess or make an assumption.
 
 Output each question on its own line, numbered (1., 2., etc.).
 
-<spec>
+<document>
 {spec_text}
-</spec>"""
+</document>"""
 
     options = ClaudeAgentOptions(
-        system_prompt="You are a critical analyst. Your job is to ask probing, insightful questions about specifications to surface gaps, ambiguities, and unstated assumptions. Ask only questions — do not answer them.",
+        system_prompt=(
+            "You are a critical analyst. Read the document, infer what kind of document it is "
+            "(e.g. technical spec, product brief, prompt, proposal, plan, research question, etc.), "
+            "and ask questions appropriate to its type and purpose. Your questions should surface "
+            "gaps, ambiguities, and unstated assumptions that would matter to whoever acts on this "
+            "document. Ask only questions — do not answer them or suggest solutions."
+        ),
         model=model,
         permission_mode="bypassPermissions",
         allowed_tools=[],
@@ -146,13 +194,16 @@ async def run(args: argparse.Namespace) -> None:
 
     questioner_model = args.questioner_model or args.model
     planner_model = args.planner_model or args.model
+    writer_model = args.writer_model or planner_model
 
     print_header("Socratic Enhancer")
-    print(f"  Spec:       {spec_path}")
+    print(f"  Document:   {spec_path}")
     print(f"  Questions:  {args.questions}/iteration")
     print(f"  Iterations: {args.iterations}")
     print(f"  Questioner: {questioner_model}")
     print(f"  Planner:    {planner_model}")
+    if writer_model != planner_model:
+        print(f"  Writer:     {writer_model}")
     if args.effort:
         print(f"  Effort:     {args.effort}")
     print(f"  Output:     {output_dir}/")
@@ -162,10 +213,10 @@ async def run(args: argparse.Namespace) -> None:
 
     planner_options = ClaudeAgentOptions(
         system_prompt=(
-            "You are a spec refinement agent. You will be given a spec document and asked "
+            "You are a document refinement agent. You will be given a document and asked "
             "probing questions about it. Answer each question thoroughly, thinking through "
-            "implications and edge cases. When asked to revise the spec, produce the complete "
-            "revised spec between <revised_spec> and </revised_spec> tags, followed by a brief "
+            "implications and edge cases. When asked to revise the document, produce the complete "
+            "revised document between <revised_spec> and </revised_spec> tags, followed by a brief "
             "summary of the refinements you made."
         ),
         model=planner_model,
@@ -178,7 +229,7 @@ async def run(args: argparse.Namespace) -> None:
     async with ClaudeSDKClient(options=planner_options) as planner:
         # Initialize planner with the spec
         async with Spinner("Initializing planner"):
-            await planner.query(f"Here is the spec document you will be refining:\n\n{spec_text}")
+            await planner.query(f"Here is the document you will be refining:\n\n{spec_text}")
             async for message in planner.receive_response():
                 if isinstance(message, ResultMessage) and message.total_cost_usd:
                     total_cost += message.total_cost_usd
@@ -193,7 +244,8 @@ async def run(args: argparse.Namespace) -> None:
             print_step(f"[1/3] Generating {args.questions} Socratic questions")
             async with Spinner("Questioner thinking") as sp:
                 questions, q_cost = await run_questioner(
-                    current_spec, args.questions, questioner_model, args.effort
+                    current_spec, args.questions, questioner_model, args.effort,
+                    i, args.iterations,
                 )
                 total_cost += q_cost
             print(f"{DIM}     Done in {sp.elapsed:.0f}s{RESET}")
@@ -206,7 +258,7 @@ async def run(args: argparse.Namespace) -> None:
             print()
             answer_start = time.monotonic()
             await planner.query(
-                f"Here are {args.questions} probing questions about the current spec. "
+                f"Here are {args.questions} probing questions about the current document. "
                 f"Think through each one carefully and answer in detail.\n\n{questions}"
             )
             answers_text = ""
@@ -222,12 +274,17 @@ async def run(args: argparse.Namespace) -> None:
             answer_elapsed = time.monotonic() - answer_start
             print(f"\n{DIM}     Done in {answer_elapsed:.0f}s{RESET}")
 
-            # Step 3: Planner revises spec — spinner (output is just the raw spec)
-            print_step("[3/3] Revising spec")
-            async with Spinner("Planner writing revised spec") as sp:
+            # Step 3: Revise document — switch to writer model if different
+            print_step("[3/3] Revising document")
+            if writer_model != planner_model:
+                await planner.set_model(writer_model)
+            async with Spinner("Writing revised document") as sp:
                 await planner.query(
-                    "Based on your answers above, revise the spec document to address the issues raised. "
-                    "Output the complete revised spec between <revised_spec> and </revised_spec> tags, "
+                    "Based on your answers above, revise the document. Fold your conclusions "
+                    "directly into the existing text — strengthen and clarify what's already there rather "
+                    "than appending new sections. The goal is a denser, more precise document, "
+                    "not a longer one. Every sentence should reduce ambiguity for whoever acts on this.\n\n"
+                    "Output the complete revised document between <revised_spec> and </revised_spec> tags, "
                     "followed by a brief summary of what refinements you made."
                 )
                 revision_text = ""
@@ -236,6 +293,8 @@ async def run(args: argparse.Namespace) -> None:
                         revision_text += extract_text(message)
                     elif isinstance(message, ResultMessage) and message.total_cost_usd:
                         total_cost += message.total_cost_usd
+            if writer_model != planner_model:
+                await planner.set_model(planner_model)
             print(f"{DIM}     Done in {sp.elapsed:.0f}s{RESET}")
 
             # Extract revised spec
@@ -270,9 +329,9 @@ async def run(args: argparse.Namespace) -> None:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Iteratively refine a spec document using Socratic dialogue between two Claude agents."
+        description="Iteratively refine a document using Socratic dialogue between two Claude agents."
     )
-    parser.add_argument("spec_file", help="Path to the input spec document")
+    parser.add_argument("spec_file", metavar="document", help="Path to the input document")
     parser.add_argument(
         "-q", "--questions", type=int, default=5, help="Number of Socratic questions per iteration (default: 5)"
     )
@@ -283,6 +342,7 @@ def main():
     parser.add_argument("--model", default="claude-sonnet-4-5", help="Model for both agents (default: claude-sonnet-4-5)")
     parser.add_argument("--questioner-model", default=None, help="Model for the Questioner agent (overrides --model)")
     parser.add_argument("--planner-model", default=None, help="Model for the Planner agent (overrides --model)")
+    parser.add_argument("--writer-model", default=None, help="Model for writing revisions (defaults to planner model)")
     parser.add_argument(
         "--effort", choices=["low", "medium", "high", "max"], default=None,
         help="Reasoning effort level (default: high). 'max' is Opus 4.6 only.",
