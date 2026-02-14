@@ -52,49 +52,50 @@ You'll need a valid Claude API key configured (via `ANTHROPIC_API_KEY` or Claude
 ## Usage
 
 ```
-python socratic_enhancer.py <spec_file> [options]
+python socratic_enhancer.py <spec_file> <output_dir> [options]
 ```
 
 ### Options
 
-| Flag | Default | Description |
-|------|---------|-------------|
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `spec_file` | (required) | Path to the input spec document |
+| `output_dir` | (required) | Directory for versioned outputs |
 | `-q`, `--questions` | `5` | Questions per iteration |
 | `-i`, `--iterations` | `3` | Number of refinement passes |
-| `-o`, `--output-dir` | `./versions` | Where versioned specs are saved |
 | `--model` | `claude-sonnet-4-5` | Model for both agents |
 | `--questioner-model` | (uses `--model`) | Override model for the Questioner |
 | `--planner-model` | (uses `--model`) | Override model for the Planner |
-| `--thinking-budget` | (none) | Max thinking tokens for extended thinking |
+| `--effort` | `high` | Reasoning effort: `low`, `medium`, `high`, `max` (max is Opus 4.6 only) |
 
 ### Examples
 
 Simplest run — 5 questions, 3 iterations, Sonnet for both agents:
 
 ```
-python socratic_enhancer.py spec.md
+python socratic_enhancer.py spec.md ./versions
 ```
 
 Quick and cheap pass with fewer questions:
 
 ```
-python socratic_enhancer.py spec.md -q 3 -i 2
+python socratic_enhancer.py spec.md ./versions -q 3 -i 2
 ```
 
 Use a cheap model for questions, a powerful one for answering and revising:
 
 ```
-python socratic_enhancer.py spec.md \
+python socratic_enhancer.py spec.md ./versions \
   --questioner-model claude-haiku-4-5 \
   --planner-model claude-opus-4-6
 ```
 
-Deep reasoning with extended thinking:
+Maximum reasoning depth with Opus:
 
 ```
-python socratic_enhancer.py spec.md \
+python socratic_enhancer.py spec.md ./versions \
   --planner-model claude-opus-4-6 \
-  --thinking-budget 10000
+  --effort max
 ```
 
 ## Getting the most out of it
@@ -107,6 +108,6 @@ python socratic_enhancer.py spec.md \
 
 **Mix models deliberately.** The Questioner doesn't need to be expensive — it's just generating questions, and even smaller models ask good ones. The Planner benefits more from capability since it needs to reason through answers and produce a coherent revised document. A common setup is Haiku for questions, Sonnet or Opus for planning.
 
-**Use thinking budget for complex specs.** If your spec involves tricky architectural decisions or subtle trade-offs, giving the Planner a thinking budget (`--thinking-budget 10000`) lets it reason more carefully before answering. This matters most with Opus.
+**Crank up effort for complex specs.** If your spec involves tricky architectural decisions or subtle trade-offs, `--effort max` (Opus 4.6 only) lets the Planner reason as deeply as it can. For Sonnet, `high` is the default and already the maximum.
 
 **The output is a starting point.** The tool produces a more thorough spec, not a perfect one. Read the final version critically. You'll often find that the tool surfaced the right questions but you'd answer some of them differently. That's the point — it's showing you what to think about.

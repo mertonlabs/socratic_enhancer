@@ -82,7 +82,7 @@ def extract_revised_spec(text: str) -> str | None:
 
 
 async def run_questioner(
-    spec_text: str, num_questions: int, model: str, thinking_budget: int | None
+    spec_text: str, num_questions: int, model: str, effort: str | None
 ) -> tuple[str, float]:
     """Run an ephemeral Questioner agent. Returns (questions_text, cost)."""
     prompt = f"""Read the following spec document and generate exactly {num_questions} Socratic questions that probe for:
@@ -104,7 +104,7 @@ Output each question on its own line, numbered (1., 2., etc.).
         permission_mode="bypassPermissions",
         allowed_tools=[],
         max_turns=1,
-        max_thinking_tokens=thinking_budget,
+        effort=effort,
     )
 
     response_parts = []
@@ -153,8 +153,8 @@ async def run(args: argparse.Namespace) -> None:
     print(f"  Iterations: {args.iterations}")
     print(f"  Questioner: {questioner_model}")
     print(f"  Planner:    {planner_model}")
-    if args.thinking_budget:
-        print(f"  Thinking:   {args.thinking_budget} tokens")
+    if args.effort:
+        print(f"  Effort:     {args.effort}")
     print(f"  Output:     {output_dir}/")
     print(f"\n{DIM}Saved initial spec as v0.md{RESET}")
 
@@ -172,7 +172,7 @@ async def run(args: argparse.Namespace) -> None:
         permission_mode="bypassPermissions",
         allowed_tools=[],
         max_turns=2,
-        max_thinking_tokens=args.thinking_budget,
+        effort=args.effort,
     )
 
     async with ClaudeSDKClient(options=planner_options) as planner:
@@ -193,7 +193,7 @@ async def run(args: argparse.Namespace) -> None:
             print_step(f"[1/3] Generating {args.questions} Socratic questions")
             async with Spinner("Questioner thinking") as sp:
                 questions, q_cost = await run_questioner(
-                    current_spec, args.questions, questioner_model, args.thinking_budget
+                    current_spec, args.questions, questioner_model, args.effort
                 )
                 total_cost += q_cost
             print(f"{DIM}     Done in {sp.elapsed:.0f}s{RESET}")
@@ -279,15 +279,13 @@ def main():
     parser.add_argument(
         "-i", "--iterations", type=int, default=3, help="Number of refinement iterations (default: 3)"
     )
-    parser.add_argument(
-        "-o", "--output-dir", default="./versions", help="Directory for versioned outputs (default: ./versions)"
-    )
+    parser.add_argument("output_dir", help="Directory for versioned outputs")
     parser.add_argument("--model", default="claude-sonnet-4-5", help="Model for both agents (default: claude-sonnet-4-5)")
     parser.add_argument("--questioner-model", default=None, help="Model for the Questioner agent (overrides --model)")
     parser.add_argument("--planner-model", default=None, help="Model for the Planner agent (overrides --model)")
     parser.add_argument(
-        "--thinking-budget", type=int, default=None,
-        help="Max thinking tokens for extended thinking (ignored if model doesn't support it)",
+        "--effort", choices=["low", "medium", "high", "max"], default=None,
+        help="Reasoning effort level (default: high). 'max' is Opus 4.6 only.",
     )
 
     args = parser.parse_args()
