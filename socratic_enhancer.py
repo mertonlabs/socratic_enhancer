@@ -124,14 +124,15 @@ def get_questioner_focus(iteration: int, total_iterations: int) -> str:
 
 async def run_questioner(
     spec_text: str, num_questions: int, model: str, effort: str | None,
-    iteration: int, total_iterations: int,
+    iteration: int, total_iterations: int, focus: str | None = None,
 ) -> tuple[str, float]:
     """Run an ephemeral Questioner agent. Returns (questions_text, cost)."""
-    focus = get_questioner_focus(iteration, total_iterations)
+    iteration_focus = get_questioner_focus(iteration, total_iterations)
+    user_focus = f"\nFocus your questions specifically on: {focus}\n" if focus else ""
     prompt = f"""Read the following document. First, understand what kind of document it is and what it's trying to achieve. Then generate exactly {num_questions} probing questions tailored to the document's purpose.
 
-{focus}
-
+{iteration_focus}
+{user_focus}
 Ask questions that force concrete, specific answers — not questions that can be answered with "yes" or "it depends." Each question should target something that, if left unresolved, would cause someone acting on this document to guess or make an assumption.
 
 Output each question on its own line, numbered (1., 2., etc.).
@@ -185,6 +186,28 @@ async def run(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     spec_text = spec_path.read_text()
+    questioner_model = args.questioner_model or args.model
+
+    if args.questions_only:
+        print_header("Socratic Enhancer — Questions Only")
+        print(f"  Document:   {spec_path}")
+        print(f"  Questions:  {args.questions}")
+        print(f"  Questioner: {questioner_model}")
+        if args.focus:
+            print(f"  Focus:      {args.focus}")
+        if args.effort:
+            print(f"  Effort:     {args.effort}")
+        async with Spinner("Questioner thinking") as sp:
+            questions, cost = await run_questioner(
+                spec_text, args.questions, questioner_model, args.effort, 1, 1,
+                focus=args.focus,
+            )
+        print(f"{DIM}     Done in {sp.elapsed:.0f}s{RESET}\n")
+        for line in questions.strip().splitlines():
+            print(f"  {YELLOW}{line}{RESET}")
+        print(f"\n{DIM}Cost: ${cost:.4f}{RESET}")
+        return
+
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -192,7 +215,6 @@ async def run(args: argparse.Namespace) -> None:
     v0_path = output_dir / "v0.md"
     v0_path.write_text(spec_text)
 
-    questioner_model = args.questioner_model or args.model
     planner_model = args.planner_model or args.model
     writer_model = args.writer_model or planner_model
 
@@ -204,6 +226,8 @@ async def run(args: argparse.Namespace) -> None:
     print(f"  Planner:    {planner_model}")
     if writer_model != planner_model:
         print(f"  Writer:     {writer_model}")
+    if args.focus:
+        print(f"  Focus:      {args.focus}")
     if args.effort:
         print(f"  Effort:     {args.effort}")
     print(f"  Output:     {output_dir}/")
@@ -245,7 +269,7 @@ async def run(args: argparse.Namespace) -> None:
             async with Spinner("Questioner thinking") as sp:
                 questions, q_cost = await run_questioner(
                     current_spec, args.questions, questioner_model, args.effort,
-                    i, args.iterations,
+                    i, args.iterations, focus=args.focus,
                 )
                 total_cost += q_cost
             print(f"{DIM}     Done in {sp.elapsed:.0f}s{RESET}")
@@ -338,7 +362,15 @@ def main():
     parser.add_argument(
         "-i", "--iterations", type=int, default=3, help="Number of refinement iterations (default: 3)"
     )
-    parser.add_argument("output_dir", help="Directory for versioned outputs")
+    parser.add_argument(
+        "--questions-only", action="store_true",
+        help="Generate and print one set of questions without running the planner or writer"
+    )
+    parser.add_argument(
+        "--focus", default=None,
+        help="Optional focus area to direct the questioner (e.g. 'security', 'error handling')"
+    )
+    parser.add_argument("output_dir", nargs="?", default=None, help="Directory for versioned outputs")
     parser.add_argument("--model", default="claude-sonnet-4-5", help="Model for both agents (default: claude-sonnet-4-5)")
     parser.add_argument("--questioner-model", default=None, help="Model for the Questioner agent (overrides --model)")
     parser.add_argument("--planner-model", default=None, help="Model for the Planner agent (overrides --model)")
@@ -349,6 +381,8 @@ def main():
     )
 
     args = parser.parse_args()
+    if not args.questions_only and args.output_dir is None:
+        parser.error("output_dir is required unless --questions-only is set")
     asyncio.run(run(args))
 
 
